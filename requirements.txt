@@ -1,4 +1,3 @@
-python-telegram-bot==20.7
-openai==1.45.1
+python-telegram-bot==21.3
+openai>=1.0.0
 python-dotenv
-tornado==6.4.1
