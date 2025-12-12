@@ -1,9 +1,10 @@
 import os
+import logging
 from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
@@ -11,33 +12,39 @@ from telegram.ext import (
 from openai import AsyncOpenAI
 import asyncio
 
-# ====== Токены ======
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-BASE_URL = os.getenv("BASE_URL")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+logging.basicConfig(level=logging.INFO)
 
+# ====== ТЕЛЕГРАМ ТОКЕН ======
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# ====== OPENAI KEY ======
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# Храним timestamp, когда пользователь снова может получить карту
+# BASE URL для webhook
+BASE_URL = os.getenv("BASE_URL")
+
+# ID админа
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# Ограничение на получение карты раз в сутки
 next_allowed = {}
 
 
 async def generate_tarot_card():
     prompt = """
-Ты — профессиональный таролог с глубоким опытом.
+Ты — профессиональный таролог с глубоким опытом. 
 Случайным образом вытяни одну карту из классической колоды Таро.
 
-Формат ответа:
+Дай ответ строго в таком формате:
 
-Название карты
+Название карты (на русском)
 
-Короткое значение
+Короткое значение карты
 
-Совет карты на сегодня
+Совет карты на сегодняшний день
 
-Пиши красиво, мистично и понятно.
-До 150 слов.
+Пиши дружелюбно, понятно, немного мистически, красиво. До 150 слов.
 """
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -49,16 +56,14 @@ async def generate_tarot_card():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("Получить карту дня", callback_data="daily_card")]]
 
-    welcome = (
+    text = (
         "✨ Добро пожаловать в *Таро Онлайн*!\n\n"
         "Жми кнопку, чтобы получить карту дня.\n"
-        "Карту можно получить раз в сутки.\n"
-        "Я напомню, когда можно снова."
+        "Карту можно получить только раз в сутки.\n"
+        "Я напомню, когда появится новая."
     )
 
-    await update.message.reply_text(
-        welcome, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -66,17 +71,17 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     now = datetime.utcnow()
 
-    # Админ всегда может
+    # Админскому кабану можно всегда
     if user_id == ADMIN_ID:
         await query.answer("Тяну карту, хозяин...")
         card = await generate_tarot_card()
         await query.edit_message_text(f"✨ Админская карта:\n\n{card}", parse_mode="Markdown")
         return
 
-    # Проверка лимита
+    # Если ещё рано
     if user_id in next_allowed and now < next_allowed[user_id]:
         reset_time = next_allowed[user_id].strftime("%H:%M UTC")
-        await query.answer(f"Ты уже получал карту. Следующая после {reset_time}.", show_alert=True)
+        await query.answer(f"Следующая карта будет доступна после {reset_time}.", show_alert=True)
         return
 
     await query.answer("Тяну карту...")
@@ -84,11 +89,11 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     card = await generate_tarot_card()
     await query.edit_message_text(f"✨ *Твоя карта дня:*\n\n{card}", parse_mode="Markdown")
 
-    # Устанавливаем время следующей карты
+    # 24 часа блокировки
     next_time = now + timedelta(days=1)
     next_allowed[user_id] = next_time
 
-    # Запланировать уведомление через сутки
+    # Уведомление через сутки
     context.job_queue.run_once(
         notify_user,
         when=timedelta(days=1),
@@ -105,59 +110,62 @@ async def notify_user(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=user_id,
-            text="✨ Новый день, новая карта!",
+            text="✨ Время новой карты дня!",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-    except:
+    except Exception:
         pass
 
 
-# ---------------------------
-# AIOHTTP Webhook Server
-# ---------------------------
+# =================================================================
+# WEBHOOK
+# =================================================================
 
 async def webhook_handler(request):
-    app = request.app["bot_app"]
+    application: Application = request.app["application"]
     data = await request.json()
-    update = Update.de_json(data, app.bot)
-    await app.process_update(update)
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
     return web.Response(text="OK")
 
 
 async def main():
-    # Telegram application
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN не найден.")
+
+    if not BASE_URL:
+        raise RuntimeError("BASE_URL не найден.")
+
+    application = Application.builder().token(BOT_TOKEN).build()
 
     # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(daily_card, pattern="daily_card"))
 
-    # AIOHTTP server
-    web_app = web.Application()
-    web_app["bot_app"] = application
-    web_app.add_routes([web.post("/webhook", webhook_handler)])
+    # Чистим вебхук перед установкой нового
+    await application.bot.delete_webhook(drop_pending_updates=True)
+    await application.bot.set_webhook(url=f"{BASE_URL}/webhook")
 
-    # Удаляем старые вебхуки
-    await application.bot.delete_webhook()
-
-    # Ставим новый
-    await application.bot.set_webhook(f"{BASE_URL}/webhook")
-
-    # Инициализация PTB
+    # Запускаем job-queue + application
     await application.initialize()
     await application.start()
 
-    # Запуск aiohttp
+    # aiohttp сервер
+    web_app = web.Application()
+    web_app["application"] = application
+    web_app.add_routes([web.post("/webhook", webhook_handler)])
+
     port = int(os.getenv("PORT", 10000))
+
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    print(f"Webhook слушает порт {port}")
+    logging.info(f"Webhook запущен на порту {port}")
 
-    # Ждём завершения (вечно)
-    await application.shutdown()  # не завершится, пока контейнер не упадет
+    # Просто держим процесс живым (Render убьёт сам)
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
