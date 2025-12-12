@@ -10,19 +10,13 @@ from telegram.ext import (
 )
 from openai import AsyncOpenAI
 
-# ====== ТВОЙ ТЕЛЕГРАМ ТОКЕН ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-# ====== ТВой OPENAI API KEY ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+BASE_URL = os.getenv("BASE_URL")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-BASE_URL = os.getenv("BASE_URL")
-
-# Админ
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-
-# Храним timestamp, когда пользователь снова может получить карту
 next_allowed = {}
 
 
@@ -51,16 +45,12 @@ async def generate_tarot_card():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(
-        "Получить карту дня", callback_data="daily_card")]]
-
+    keyboard = [[InlineKeyboardButton("Получить карту дня", callback_data="daily_card")]]
     welcome = (
-        "✨ Добро пожаловать в *Таро Онлайн*!\n\n"
+        "✨ Добро пожаловать!\n\n"
         "Жми кнопку, чтобы получить карту дня.\n"
-        "Карту можно получить только раз в сутки.\n"
-        "Я напомню, когда появится новая."
+        "Одна карта в сутки. Я напомню, когда можно снова."
     )
-
     await update.message.reply_text(
         welcome, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -71,16 +61,14 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     now = datetime.utcnow()
 
-    # Админ всегда может
     if user_id == ADMIN_ID:
-        await query.answer("Тяну карту, хозяин...")
+        await query.answer("Тяну карту...")
         card = await generate_tarot_card()
         await query.edit_message_text(
             f"✨ Админская карта:\n\n{card}", parse_mode="Markdown"
         )
         return
 
-    # Если пользователь уже получил карту сегодня
     if user_id in next_allowed and now < next_allowed[user_id]:
         reset_time = next_allowed[user_id].strftime("%H:%M UTC")
         await query.answer(
@@ -96,11 +84,10 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✨ *Твоя карта дня:*\n\n{card}", parse_mode="Markdown"
     )
 
-    # Отсечка 24 часа
     next_time = now + timedelta(days=1)
     next_allowed[user_id] = next_time
 
-    # Создаем задачу уведомления ровно через сутки
+    # напоминание через сутки
     context.job_queue.run_once(
         notify_user,
         when=timedelta(days=1),
@@ -111,9 +98,7 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def notify_user(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.chat_id
-
-    keyboard = [[InlineKeyboardButton(
-        "Получить карту дня", callback_data="daily_card")]]
+    keyboard = [[InlineKeyboardButton("Получить карту дня", callback_data="daily_card")]]
 
     try:
         await context.bot.send_message(
@@ -122,53 +107,53 @@ async def notify_user(context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     except Exception:
-        pass  # Если юзер удалил бота — ну и ладно
+        pass
 
-# -------------------------------------------------------
-# webhook сервер
-# -------------------------------------------------------
 
+# ---------------------------
+# Webhook обработчик
+# ---------------------------
 
 async def webhook_handler(request):
+    bot_app = request.app["application"]
     data = await request.json()
-    await request.app["bot"].process_update(Update.de_json(data, request.app["bot"].bot))
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
     return web.Response(text="OK")
 
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# ---------------------------
+# Главный запуск
+# ---------------------------
 
-    # HANDLERS
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(daily_card, pattern="daily_card")
-                    )
+async def main():
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# aiohttp веб-сервер
-    app = web.Application()
-    app["bot"] = application
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(daily_card, pattern="daily_card"))
 
-    app.add_routes([web.post("/webhook", webhook_handler)])
-
-    # Чистим старые вебхуки
+    # Ставим webhook
     await application.bot.delete_webhook()
-
-    # Ставим новый
     await application.bot.set_webhook(f"{BASE_URL}/webhook")
 
-    # Запуск job_queue + webhook-сервера
+    # Инициализация job_queue и обработчиков
     await application.initialize()
     await application.start()
 
+    # aiohttp сервер
+    aio_app = web.Application()
+    aio_app["application"] = application
+    aio_app.router.add_post("/webhook", webhook_handler)
+
     port = int(os.getenv("PORT", 10000))
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(aio_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    print(f"Webhook запущен на порту {port}")
-
-    await application.updater.start_polling()  # hack to keep job_queue alive
-    await application.updater.idle()
+    print(f"Webhook слушает порт {port}")
+    # держим процесс живым
+    await application.wait_for_stop()
 
 
 if __name__ == "__main__":
