@@ -44,9 +44,8 @@ async def generate_tarot_card():
 
 Совет карты на сегодняшний день
 
-Пиши дружелюбно, понятно, немного мистически, чтобы вызвать интерес и в то же время красиво, с разелением на обзацы. 
-Каждый абзац с новой строки с красивым символом. 
-Объём до 150 слов. 
+Пиши дружелюбно, понятно, немного мистически, красиво, с разделением на абзацы. 
+Объем до 150 слов.
 """
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -73,14 +72,14 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     now = datetime.utcnow()
 
-    # Админскому кабану можно всегда
+    # Админ всегда может тянуть
     if user_id == ADMIN_ID:
         await query.answer("Тяну карту, хозяин...")
         card = await generate_tarot_card()
         await query.edit_message_text(f"✨ Админская карта:\n\n{card}", parse_mode="Markdown")
         return
 
-    # Если ещё рано
+    # Если рано
     if user_id in next_allowed and now < next_allowed[user_id]:
         reset_time = next_allowed[user_id].strftime("%H:%M UTC")
         await query.answer(f"Следующая карта будет доступна после {reset_time}.", show_alert=True)
@@ -92,10 +91,9 @@ async def daily_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✨ *Твоя карта дня:*\n\n{card}", parse_mode="Markdown")
 
     # 24 часа блокировки
-    next_time = now + timedelta(days=1)
-    next_allowed[user_id] = next_time
+    next_allowed[user_id] = now + timedelta(days=1)
 
-    # Уведомление через сутки
+    # Уведомление
     context.job_queue.run_once(
         notify_user,
         when=timedelta(days=1),
@@ -134,7 +132,6 @@ async def webhook_handler(request):
 async def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN не найден.")
-
     if not BASE_URL:
         raise RuntimeError("BASE_URL не найден.")
 
@@ -144,13 +141,13 @@ async def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(daily_card, pattern="daily_card"))
 
-    # Чистим вебхук перед установкой нового
+    # Чистим webhook
     await application.bot.delete_webhook(drop_pending_updates=True)
-    await application.bot.set_webhook(url=f"{BASE_URL}/webhook")
-
-    # Запускаем job-queue + application
     await application.initialize()
     await application.start()
+
+    # Настраиваем новый webhook
+    await application.bot.set_webhook(f"{BASE_URL}/webhook")
 
     # aiohttp сервер
     web_app = web.Application()
@@ -166,7 +163,7 @@ async def main():
 
     logging.info(f"Webhook запущен на порту {port}")
 
-    # Просто держим процесс живым (Render убьёт сам)
+    # Держим процесс живым
     await asyncio.Event().wait()
 
 
